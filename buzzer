@@ -1,20 +1,30 @@
+
 #include <LiquidCrystal_I2C.h>
 #include <Wire.h>
 
 LiquidCrystal_I2C lcd(0x27, 16, 2);
 
-// Alarm Icons
+// === ИКОНКИ ===
 byte alarmIcon[8] = {B00100, B01110, B01110, B01110, B11111, B00000, B00100, B00000};
 byte soundIcon[8] = {B00100, B01100, B11111, B11111, B11111, B01100, B00100, B00000};
 byte muteIcon[8]  = {B10001, B01010, B00100, B01010, B10001, B00000, B00000, B00000};
 
-enum DisplayMode { MAIN_DISPLAY, ALARM_SET, STOPWATCH, GAME };
+// === РЕЖИМЫ ===
+enum DisplayMode {
+  MAIN_DISPLAY, ALARM_SET, STOPWATCH, GAME,
+  SET_TIME, SET_VOLUME, CREDENTIALS_SCROLL
+};
 DisplayMode currentMode = MAIN_DISPLAY;
 
+enum SettingsOption { ADJUST_TIME, ADJUST_VOLUME, CREDENTIALS, NUM_OPTIONS };
+SettingsOption currentSetting = ADJUST_TIME;
+bool inSettingsMenu = false;
+
+// === ВРЕМЯ ===
 unsigned long previousMillis = 0;
 int currentSecond = 0, currentMinute = 0, currentHour = 0;
 
-// Alarm
+// === БУДИЛЬНИК ===
 bool alarmSet = false;
 int alarmHour = 0, alarmMinute = 0;
 int selectedField = 0;
@@ -22,11 +32,12 @@ int melodyIndex = 0;
 const int NUM_MELODIES = 3;
 String melodies[NUM_MELODIES] = {"Tone1", "Tone2", "Tone3"};
 bool soundOn = true;
+bool alarmRinging = false;
+bool alarmSnoozed = false;
+int snoozeHour = 0, snoozeMinute = 0;
 
-// Buzzer
+// === ПИНЫ ===
 const int buzzerPin = 9;
-
-// Buttons
 const int modeButton = 2;
 const int buttonUp = 3;
 const int buttonDown = 4;
@@ -36,12 +47,15 @@ const int buttonSet = 8;
 bool lastToggleButtonState = LOW;
 bool lastModeButtonState = LOW;
 
-// Stopwatch
+// === СТОПВАТЧ ===
 bool stopwatchRunning = false;
 unsigned long stopwatchStartTime = 0;
 unsigned long stopwatchElapsed = 0;
 
-// Game
+// Звук
+int volumeLevel = 5;
+
+// === ДЛЯ ИГРЫ ===
 #define SPRITE_RUN1 1
 #define SPRITE_RUN2 2
 #define SPRITE_JUMP 3
@@ -73,75 +87,246 @@ unsigned long stopwatchElapsed = 0;
 char terrainUpper[TERRAIN_WIDTH + 1];
 char terrainLower[TERRAIN_WIDTH + 1];
 volatile bool buttonPushed = false;
-unsigned int maxScore = 0;
 
+// === НАСТРОЙКА ===
 void setup() {
-  lcd.init();
-  lcd.backlight();
+  lcd.init(); lcd.backlight();
+  showLoadingAnimation();
   lcd.createChar(0, alarmIcon);
   lcd.createChar(1, soundIcon);
   lcd.createChar(2, muteIcon);
-
   pinMode(modeButton, INPUT);
   pinMode(buttonUp, INPUT);
   pinMode(buttonDown, INPUT);
   pinMode(buttonRight, INPUT);
   pinMode(buttonSet, INPUT);
   pinMode(buzzerPin, OUTPUT);
-
   initializeGraphics();
 }
 
+
+
+// === ГЛАВНЫЙ LOOP ===
 void loop() {
   updateTime();
   handleButtons();
-  lcd.clear();
 
-  if (alarmSet && currentHour == alarmHour && currentMinute == alarmMinute && currentSecond == 0) {
-    playMelody(melodyIndex);
-    alarmSet = false;
+  // === Настройки ===
+  if (inSettingsMenu) {
+    if (isButtonPressed(buttonUp)) {
+      currentSetting = static_cast<SettingsOption>((currentSetting + 1) % NUM_OPTIONS);
+      displayCurrentSetting();
+      delay(200);
+    }
+
+    if (isButtonPressed(buttonDown)) {
+      inSettingsMenu = false;
+      switch (currentSetting) {
+        case ADJUST_TIME:
+          currentMode = SET_TIME;
+          selectedField = 0;
+          break;
+        case ADJUST_VOLUME:
+          currentMode = SET_VOLUME;
+          break;
+        case CREDENTIALS:
+          currentMode = CREDENTIALS_SCROLL;
+          break;
+      }
+      return;
+    }
+
+    if (isButtonPressed(buttonSet)) {
+      inSettingsMenu = false;
+      currentMode = MAIN_DISPLAY;
+      lcd.clear();
+      displayTime(currentHour, currentMinute);
+      delay(200);
+    }
+    return;
   }
 
+  // === Будильник ===
+  if (alarmSet && !alarmRinging && currentHour == alarmHour && currentMinute == alarmMinute && currentSecond == 0) {
+    alarmRinging = true;
+    playMelody(melodyIndex);
+  }
+
+  if (alarmSnoozed && !alarmRinging && currentHour == snoozeHour && currentMinute == snoozeMinute && currentSecond == 0) {
+    alarmRinging = true;
+    alarmSnoozed = false;
+    playMelody(melodyIndex);
+  }
+
+  if (alarmRinging) {
+    if (isButtonPressed(buttonSet)) {
+      alarmRinging = false;
+      noTone(buzzerPin);
+      alarmSet = false;
+      delay(300);
+    } else if (
+      isButtonPressed(modeButton) ||
+      isButtonPressed(buttonUp) ||
+      isButtonPressed(buttonDown) ||
+      isButtonPressed(buttonRight)
+    ) {
+      alarmRinging = false;
+      noTone(buzzerPin);
+      alarmSnoozed = true;
+      snoozeMinute = currentMinute + 5;
+      snoozeHour = currentHour;
+      if (snoozeMinute >= 60) {
+        snoozeMinute -= 60;
+        snoozeHour = (snoozeHour + 1) % 24;
+      }
+      delay(300);
+    }
+  }
+
+  // === Вход в меню настроек ===
+  if (currentMode == MAIN_DISPLAY && isButtonPressed(buttonSet)) {
+    inSettingsMenu = true;
+    displayCurrentSetting();
+    delay(200);
+    return;
+  }
+
+  // === Отображение текущего режима ===
+  lcd.clear();
   switch (currentMode) {
     case MAIN_DISPLAY: showMainDisplay(); break;
     case ALARM_SET: showAlarmSetMode(); break;
-    case GAME: showGameMode(); break;
     case STOPWATCH: showStopwatchMode(); break;
+    case GAME: runDinoGame(); break;
+    case SET_TIME: showSetTimeMode(); break;
+    case SET_VOLUME: showSetVolumeMode(); break;
+    case CREDENTIALS_SCROLL: showScrollingCredentials(); break;
   }
 
-  if (currentMode == ALARM_SET) {
-    if (isButtonPressed(buttonRight)) selectedField = (selectedField + 1) % 3, delay(200);
+  // === Управление ALARM_SET ===
+if (currentMode == ALARM_SET) {
+  if (isButtonPressed(buttonRight)) selectedField = (selectedField + 1) % 3, delay(200);
+
+  if (isButtonPressed(buttonUp)) {
+    if (selectedField == 0) alarmHour = (alarmHour + 1) % 24;
+    else if (selectedField == 1) alarmMinute = (alarmMinute + 1) % 60;
+    else if (selectedField == 2) melodyIndex = (melodyIndex + 1) % NUM_MELODIES;
+    delay(200);
+  }
+
+  if (isButtonPressed(buttonDown)) {
+    if (selectedField == 0) alarmHour = (alarmHour - 1 + 24) % 24;
+    else if (selectedField == 1) alarmMinute = (alarmMinute - 1 + 60) % 60;
+    else if (selectedField == 2) melodyIndex = (melodyIndex - 1 + NUM_MELODIES) % NUM_MELODIES;
+    delay(200);
+  }
+
+  if (isButtonPressed(buttonSet)) {
+    alarmSet = true;
+    currentMode = MAIN_DISPLAY;
+    delay(200);
+  }
+}
+
+
+  // === Управление SET_TIME ===
+  if (currentMode == SET_TIME) {
+    if (isButtonPressed(buttonRight)) selectedField = (selectedField + 1) % 2, delay(200);
+
     if (isButtonPressed(buttonUp)) {
-      if (selectedField == 0) alarmHour = (alarmHour + 1) % 24;
-      else if (selectedField == 1) alarmMinute = (alarmMinute + 1) % 60;
-      else if (selectedField == 2) melodyIndex = (melodyIndex + 1) % NUM_MELODIES;
+      if (selectedField == 0) currentHour = (currentHour + 1) % 24;
+      else currentMinute = (currentMinute + 1) % 60;
       delay(200);
     }
+
     if (isButtonPressed(buttonDown)) {
-      if (selectedField == 0) alarmHour = (alarmHour - 1 + 24) % 24;
-      else if (selectedField == 1) alarmMinute = (alarmMinute - 1 + 60) % 60;
-      else if (selectedField == 2) melodyIndex = (melodyIndex - 1 + NUM_MELODIES) % NUM_MELODIES;
+      if (selectedField == 0) currentHour = (currentHour - 1 + 24) % 24;
+      else currentMinute = (currentMinute - 1 + 60) % 60;
       delay(200);
     }
-    if (isButtonPressed(buttonSet)) alarmSet = true, currentMode = MAIN_DISPLAY, delay(200);
+
+    if (isButtonPressed(buttonSet)) {
+      currentMode = MAIN_DISPLAY;
+      delay(200);
+    }
   }
 
-  if (currentMode == STOPWATCH && isButtonPressed(buttonUp)) {
-    if (!stopwatchRunning) stopwatchStartTime = millis() - stopwatchElapsed, stopwatchRunning = true;
-    else stopwatchElapsed = millis() - stopwatchStartTime, stopwatchRunning = false;
-    delay(200);
+  // === Управление SET_VOLUME ===
+  if (currentMode == SET_VOLUME) {
+    if (isButtonPressed(buttonUp) && volumeLevel < 10) volumeLevel++, delay(200);
+    if (isButtonPressed(buttonDown) && volumeLevel > 0) volumeLevel--, delay(200);
+    if (isButtonPressed(buttonSet)) currentMode = MAIN_DISPLAY, delay(200);
   }
 
-  if (currentMode == STOPWATCH && isButtonPressed(buttonDown)) {
-    stopwatchElapsed = 0;
-    if (stopwatchRunning) stopwatchStartTime = millis();
-    delay(200);
-  }
   delay(200);
 }
 
-bool isButtonPressed(int pin) {
-  return digitalRead(pin) == HIGH;
+void showLoadingAnimation() {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Smart Alarm Boot");
+
+  lcd.setCursor(0, 1);
+  for (int i = 0; i < 16; i++) {
+    lcd.print((char)255);  // █ блок
+    delay(100);            // скорость загрузки
+  }
+
+  delay(500); // короткая пауза перед стартом
+}
+
+
+void playMelody(int index) {
+  if (!soundOn || volumeLevel == 0) return;
+
+  // Чем ниже громкость — тем короче тон и длиннее пауза
+  int toneDuration = map(volumeLevel, 1, 10, 50, 300);   // громкость 1 → 50 мс, 10 → 300 мс
+  int pauseDuration = map(volumeLevel, 1, 10, 250, 50);  // громкость 1 → 250 мс, 10 → 50 мс
+
+  switch (index) {
+    case 0: // Пик-пик
+      for (int i = 0; i < 10; i++) {
+        tone(buzzerPin, 1000);
+        delay(toneDuration);
+        noTone(buzzerPin);
+        delay(pauseDuration);
+      }
+      break;
+
+    case 1: {
+      int melody[] = {440, 494, 523};
+      for (int i = 0; i < 3; i++) {
+        tone(buzzerPin, melody[i]);
+        delay(toneDuration);
+        noTone(buzzerPin);
+        delay(pauseDuration);
+      }
+      break;
+    }
+
+    case 2: // Быстрые писки
+      for (int i = 0; i < 20; i++) {
+        tone(buzzerPin, 1500);
+        delay(toneDuration / 2);   // Писк покороче
+        noTone(buzzerPin);
+        delay(pauseDuration / 2);
+      }
+      break;
+  }
+}
+
+// === ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ===
+bool isButtonPressed(int pin) { return digitalRead(pin) == HIGH; }
+
+void handleButtons() {
+  int toggleState = digitalRead(buttonSet);
+  int modeState = digitalRead(modeButton);
+  if (toggleState == HIGH && lastToggleButtonState == LOW) { soundOn = !soundOn; delay(200); }
+  if (modeState == HIGH && lastModeButtonState == LOW) {
+    currentMode = static_cast<DisplayMode>((currentMode + 1) % 4); delay(200);
+  }
+  lastToggleButtonState = toggleState;
+  lastModeButtonState = modeState;
 }
 
 void updateTime() {
@@ -150,6 +335,21 @@ void updateTime() {
     currentSecond++;
     if (currentSecond >= 60) currentSecond = 0, currentMinute++;
     if (currentMinute >= 60) currentMinute = 0, currentHour = (currentHour + 1) % 24;
+  }
+}
+
+void displayTime(int hour, int minute) {
+  if (hour < 10) lcd.print("0"); lcd.print(hour); lcd.print(":");
+  if (minute < 10) lcd.print("0"); lcd.print(minute);
+}
+
+void displayCurrentSetting() {
+  lcd.clear(); lcd.setCursor(0, 0); lcd.print("Settings Menu");
+  lcd.setCursor(0, 1);
+  switch (currentSetting) {
+    case ADJUST_TIME: lcd.print("> Adjust Time"); break;
+    case ADJUST_VOLUME: lcd.print("> Adjust Volume"); break;
+    case CREDENTIALS: lcd.print("> Credentials"); break;
   }
 }
 
@@ -180,50 +380,55 @@ void showStopwatchMode() {
   if (seconds < 10) lcd.print("0"); lcd.print(seconds);
 }
 
-void displayTime(int hour, int minute) {
-  if (hour < 10) lcd.print("0"); lcd.print(hour); lcd.print(":");
-  if (minute < 10) lcd.print("0"); lcd.print(minute);
+
+
+void showSetTimeMode() {
+  lcd.setCursor(0, 0); lcd.print("Set Current Time:");
+  lcd.setCursor(0, 1);
+  lcd.print(selectedField == 0 ? ">" : " ");
+  if (currentHour < 10) lcd.print("0"); lcd.print(currentHour); lcd.print(":");
+  lcd.print(selectedField == 1 ? ">" : " ");
+  if (currentMinute < 10) lcd.print("0"); lcd.print(currentMinute);
 }
 
-void handleButtons() {
-  int toggleState = digitalRead(buttonSet);
-  int modeState = digitalRead(modeButton);
-  if (toggleState == HIGH && lastToggleButtonState == LOW) { soundOn = !soundOn; delay(200); }
-  if (modeState == HIGH && lastModeButtonState == LOW) {
-    currentMode = static_cast<DisplayMode>((currentMode + 1) % 4);
-    delay(200);
-  }
-  lastToggleButtonState = toggleState;
-  lastModeButtonState = modeState;
+void showSetVolumeMode() {
+  lcd.setCursor(0, 0); lcd.print("Set Volume:");
+  lcd.setCursor(0, 1);
+  for (int i = 0; i < volumeLevel; i++) lcd.print((char)255); // █ блоки громкости
 }
 
-void playMelody(int index) {
-  if (!soundOn) return;
-  switch (index) {
-    case 0: for (int i = 0; i < 10; i++) { tone(buzzerPin, 1000); delay(200); noTone(buzzerPin); delay(100); } break;
-    case 1: { int melody[] = {440, 494, 523}; int duration[] = {300, 300, 600};
-      for (int i = 0; i < 3; i++) { tone(buzzerPin, melody[i]); delay(duration[i]); noTone(buzzerPin); delay(100); } break; }
-    case 2: for (int i = 0; i < 20; i++) { tone(buzzerPin, 1500); delay(100); noTone(buzzerPin); delay(50); } break;
-  }
+void showScrollingCredentials() {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Anuar   Diana");
+  lcd.setCursor(0, 1);
+  lcd.print("Pasha Nefor");
+  delay(5000); // Показывать 3 секунды
+  currentMode = MAIN_DISPLAY;
 }
+
+
+
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// --------------------------------------------------------------------------------------------------------
+// GAME GAME GAME GAME GAME GAME GAME 
+
 
 void showGameMode() {
   runDinoGame();
 }
+unsigned int maxScore = 0;
 
 void runDinoGame() {
-  if (isButtonPressed(buttonSet)) {
-    currentMode = MAIN_DISPLAY;
-    delay(300);
-    return;
-  }
+  // if (isButtonPressed(modeButton) && lastModeButtonState == LOW) {
+  //   currentMode = static_cast<DisplayMode>((currentMode + 1) % 4);
+  //   delay(300);
+  //   lastModeButtonState = HIGH;
+  //   return;
+  // }
 
-  if (isButtonPressed(modeButton) && lastModeButtonState == LOW) {
-    currentMode = static_cast<DisplayMode>((currentMode + 1) % 4);
-    delay(300);
-    lastModeButtonState = HIGH;
-    return;
-  }
+  if (currentMode != GAME) return;
 
   if (isButtonPressed(buttonUp)) {
     buttonPushed = true;
@@ -237,8 +442,12 @@ void runDinoGame() {
   static unsigned int distance = 0;
 
   if (!playing) {
-    drawHero(blink ? HERO_POSITION_OFF : heroPos, terrainUpper, terrainLower, distance >> 3);
-    if (blink) { lcd.setCursor(0, 0); lcd.print("Press Start"); }
+    drawHero(blink ? HERO_POSITION_OFF : heroPos, terrainUpper, terrainLower, 0);
+    if (blink) {
+      lcd.setCursor(0, 0); lcd.print("Press Start");
+      lcd.setCursor(0, 1); lcd.print("Max: ");
+      lcd.print(maxScore);
+    }
     delay(250); blink = !blink;
 
     if (buttonPushed) {
@@ -266,6 +475,7 @@ void runDinoGame() {
 
   if (drawHero(heroPos, terrainUpper, terrainLower, distance >> 3)) {
     playing = false;
+    if ((distance >> 3) > maxScore) maxScore = distance >> 3;
   } else {
     if (heroPos == HERO_POSITION_RUN_LOWER_2 || heroPos == HERO_POSITION_JUMP_8) heroPos = HERO_POSITION_RUN_LOWER_1;
     else if ((heroPos >= HERO_POSITION_JUMP_3 && heroPos <= HERO_POSITION_JUMP_5) && terrainLower[HERO_HORIZONTAL_POSITION] != SPRITE_TERRAIN_EMPTY) heroPos = HERO_POSITION_RUN_UPPER_1;
@@ -335,3 +545,4 @@ bool drawHero(byte position, char* terrainUpper, char* terrainLower, unsigned in
   terrainLower[HERO_HORIZONTAL_POSITION] = lowerSave;
   return collide;
 }
+
