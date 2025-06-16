@@ -8,9 +8,6 @@
 4. Dino Game
 5. Settings
 
-# To run:
-
-
 # The hardware should include:
 
 1. 16x2 LCD screen with decoder
